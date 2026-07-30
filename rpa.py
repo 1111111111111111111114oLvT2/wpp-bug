@@ -13,6 +13,10 @@ FAILURE_SCREENSHOT_PATH = Path(__file__).parent / "failure_screenshot.png"
 # A cold profile's first load (no cached WhatsApp assets yet) can take much
 # longer than a warm one, so this is generous on purpose.
 PAGE_LOAD_TIMEOUT_MS = 60000
+# One-time per-run UI transitions (open community, open members dialog) - a
+# community with a lot of messages/media to render can be slow, and each of
+# these only happens once, so it's cheap to be generous.
+NAV_TIMEOUT_MS = 20000
 
 ADMIN_MARKER_SELECTOR = (
     '[data-testid="community-creator-marker"], [data-testid="community-admin-marker"]'
@@ -99,7 +103,7 @@ class AsyncCamoufoxClient:
         await page.wait_for_timeout(2000)
 
         result = page.get_by_title(search_term, exact=True).first
-        await result.wait_for(state="visible", timeout=10000)
+        await result.wait_for(state="visible", timeout=NAV_TIMEOUT_MS)
         await result.click()
         await page.wait_for_timeout(1500)
 
@@ -107,7 +111,7 @@ class AsyncCamoufoxClient:
         # "Welcome to your community!" banner - gone on later visits.
         # The header is always there and opens the same info panel.
         header = page.locator('[data-testid="conversation-info-header"]')
-        await header.wait_for(state="visible", timeout=10000)
+        await header.wait_for(state="visible", timeout=NAV_TIMEOUT_MS)
         await header.click()
         await page.wait_for_timeout(1500)
 
@@ -123,14 +127,14 @@ class AsyncCamoufoxClient:
         # unvirtualized-by-clutter "Members (N)" dialog - easier to scroll
         # and scope queries into than the mixed community-info sidebar.
         members_header = page.get_by_text("community members", exact=False).first
-        await members_header.wait_for(state="visible", timeout=10000)
+        await members_header.wait_for(state="visible", timeout=NAV_TIMEOUT_MS)
         header_text = await members_header.text_content() or ""
         match = re.match(r"\s*(\d+)", header_text)
         total_members = int(match.group(1)) if match else None
         await members_header.click()
 
         members_dialog = page.get_by_role("dialog", name="Members", exact=False)
-        await members_dialog.wait_for(state="visible", timeout=10000)
+        await members_dialog.wait_for(state="visible", timeout=NAV_TIMEOUT_MS)
         return members_dialog, total_members
 
     async def _find_next_removable_row(
@@ -195,11 +199,11 @@ class AsyncCamoufoxClient:
                 # the menu's open/close animation, and matching by text hit
                 # both, making the click land on the wrong (dead) one.
                 remove_item = page.locator('[data-testid="remove-from-community-identity"]').first
-                await remove_item.wait_for(state="visible", timeout=5000)
+                await remove_item.wait_for(state="visible", timeout=8000)
                 await remove_item.click()
 
                 confirm_btn = page.get_by_role("button", name="Remove", exact=True).first
-                await confirm_btn.wait_for(state="visible", timeout=5000)
+                await confirm_btn.wait_for(state="visible", timeout=8000)
                 await confirm_btn.click()
 
                 removed_count += 1
