@@ -44,12 +44,27 @@ class AsyncCamoufoxClient:
                 pass
 
     async def _wait_for_login(self, page: Page) -> None:
-        qr_code = page.locator('[data-testid="link-device-qr-code"]')
+        qr_code_selector = '[data-testid="link-device-qr-code"]'
+        search_box_selector = 'input[aria-label="Search or start a new chat"]'
+        qr_code = page.locator(qr_code_selector)
+
+        # Race both: waiting for the QR *alone* and then falling back to
+        # "already logged in" on timeout means a logged-in session always
+        # burns the full timeout first, since a negative wait can only
+        # resolve once the deadline is reached, never early.
         try:
-            # If the profile is already logged in, WhatsApp never renders
-            # the QR canvas, so this just times out instead of matching.
-            await qr_code.wait_for(state="visible", timeout=PAGE_LOAD_TIMEOUT_MS)
+            await page.locator(f"{qr_code_selector}, {search_box_selector}").first.wait_for(
+                state="visible", timeout=PAGE_LOAD_TIMEOUT_MS
+            )
         except PlaywrightTimeoutError:
+            await page.screenshot(path=str(FAILURE_SCREENSHOT_PATH))
+            print(
+                f"Neither the QR code nor the chat list showed up (page title: "
+                f"{await page.title()!r}). Saved {FAILURE_SCREENSHOT_PATH.name}."
+            )
+            raise
+
+        if await qr_code.count() == 0:
             print("Already logged in.")
             return
 
@@ -85,10 +100,21 @@ class AsyncCamoufoxClient:
         await result.click()
         await page.wait_for_timeout(1500)
 
-        manage = page.get_by_text("Manage community", exact=True)
-        await manage.wait_for(state="visible", timeout=10000)
-        await manage.click()
+        # The "Manage community" text link only exists in the one-time
+        # "Welcome to your community!" banner - gone on later visits.
+        # The header is always there and opens the same info panel.
+        header = page.locator('[data-testid="conversation-info-header"]')
+        await header.wait_for(state="visible", timeout=10000)
+        await header.click()
         await page.wait_for_timeout(1500)
+
+        # The info panel opens on whichever tab matches the sub-chat we
+        # came from (e.g. "Announcements") - the member list only lives
+        # under "Community", so switch to it explicitly.
+        community_tab = page.get_by_role("tab", name="Community", exact=True)
+        if await community_tab.count() > 0:
+            await community_tab.click()
+            await page.wait_for_timeout(500)
 
         # Clicking the "N community members" header opens a dedicated,
         # unvirtualized-by-clutter "Members (N)" dialog - easier to scroll
