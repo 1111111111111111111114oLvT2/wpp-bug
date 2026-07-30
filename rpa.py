@@ -133,94 +133,85 @@ class AsyncCamoufoxClient:
         await members_dialog.wait_for(state="visible", timeout=10000)
         return members_dialog, total_members
 
-    async def _list_non_admin_members(
-        self, page: Page, scope: Locator, total_members: int | None
-    ) -> list[str]:
-        """Scrolls the (virtualized) member list and collects every name
-        that has no owner/admin marker."""
-        names: dict[str, bool] = {}
-        stagnant_rounds = 0
-        last_count = -1
-        # Belt-and-suspenders cap so a stuck scroll can't loop forever even
-        # if the header count is wrong or missing - generous for a list
-        # this size (each round loads only a handful of new rows).
-        max_rounds = max(500, (total_members or 0) * 3)
-        await scope.hover()
-        for round_num in range(max_rounds):
-            for row in await scope.locator('[data-testid="cell-frame-container"]').all():
-                title_el = row.locator('[data-testid="cell-frame-title"] span[title]').first
-                try:
-                    name = await title_el.get_attribute("title", timeout=1000)
-                except PlaywrightTimeoutError:
-                    continue
-                if not name:
-                    continue
-                is_admin = await row.locator(ADMIN_MARKER_SELECTOR).count() > 0
-                names[name] = names.get(name, False) or is_admin
-
-            if total_members is not None and len(names) >= total_members:
-                break
-
-            if len(names) == last_count:
-                stagnant_rounds += 1
-                if total_members is None and stagnant_rounds >= 3:
-                    break
-            else:
-                stagnant_rounds = 0
-            last_count = len(names)
-
-            if round_num % 10 == 0:
-                progress = f"/{total_members}" if total_members is not None else ""
-                print(f"Scanning members... {len(names)}{progress}")
-
-            await page.mouse.wheel(0, 400)
-            await page.wait_for_timeout(500)
-        else:
-            print(f"Stopped after {max_rounds} scroll rounds ({len(names)} members found).")
-
-        return [name for name, is_admin in names.items() if not is_admin]
+    async def _find_next_removable_row(
+        self, scope: Locator, skip_names: set[str]
+    ) -> tuple[Locator, str] | None:
+        """Returns the first currently-rendered row that isn't an admin/owner
+        and isn't in skip_names (rows we already failed to remove)."""
+        for row in await scope.locator('[data-testid="cell-frame-container"]').all():
+            title_el = row.locator('[data-testid="cell-frame-title"] span[title]').first
+            try:
+                name = await title_el.get_attribute("title", timeout=1000)
+            except PlaywrightTimeoutError:
+                continue
+            if not name or name in skip_names:
+                continue
+            if await row.locator(ADMIN_MARKER_SELECTOR).count() > 0:
+                continue
+            return row, name
+        return None
 
     async def _remove_non_admins(
         self, page: Page, scope: Locator, total_members: int | None
     ) -> None:
-        targets = await self._list_non_admin_members(page, scope, total_members)
-        if not targets:
-            print("No non-admin members found.")
-            return
+        note = f" ({total_members} total members)" if total_members is not None else ""
+        print(f"Removing every non-admin member{note}, keeping the owner and admins.")
 
-        print(f"About to remove {len(targets)} non-admin member(s): {', '.join(targets)}")
-        answer = await asyncio.to_thread(input, "Type 'yes' to confirm removal: ")
-        if answer.strip().lower() != "yes":
-            print("Aborted, no one was removed.")
-            return
+        # Single pass: remove whatever non-admin is currently visible, only
+        # scroll for more once nothing removable is on screen. Removing a
+        # row reflows the (virtualized) list, so the next target is often
+        # already visible without scrolling at all - and since nothing is
+        # looked up by name after the fact, there's no risk of a stale
+        # match landing on the wrong row (or opening a contact instead).
+        await scope.hover()
+        removed_count = 0
+        failed_names: set[str] = set()
+        stagnant_rounds = 0
+        max_rounds = max(1000, (total_members or 50) * 4)
 
-        removed = []
-        for name in targets:
+        for _ in range(max_rounds):
+            if stagnant_rounds >= 5:
+                break
+
+            found = await self._find_next_removable_row(scope, failed_names)
+            if found is None:
+                stagnant_rounds += 1
+                await page.mouse.wheel(0, 400)
+                await page.wait_for_timeout(500)
+                continue
+
+            row, name = found
             try:
-                row = scope.get_by_text(name, exact=True).first
-                await row.scroll_into_view_if_needed(timeout=5000)
-                await row.hover()
-
-                ctx_btn = scope.locator('[data-testid="context-btn"]').first
-                await ctx_btn.wait_for(state="visible", timeout=5000)
-                await ctx_btn.click()
+                # Clicking the row opens its full dropdown (Message/View/
+                # Verify/Make admin/Remove) directly - there is no separate
+                # context-btn to click first (confirmed against the live
+                # DOM: 0 context-btn matches after this click).
+                await row.click()
 
                 # The context menu and confirm dialog render as page-level
                 # overlays, outside the members dialog's own DOM subtree.
-                remove_item = page.get_by_text("Remove from community", exact=True)
+                # Matched by data-testid, not text: WhatsApp leaves a stale
+                # duplicate "Remove from community" text node around during
+                # the menu's open/close animation, and matching by text hit
+                # both, making the click land on the wrong (dead) one.
+                remove_item = page.locator('[data-testid="remove-from-community-identity"]').first
                 await remove_item.wait_for(state="visible", timeout=5000)
                 await remove_item.click()
 
-                confirm_btn = page.get_by_role("button", name="Remove", exact=True)
+                confirm_btn = page.get_by_role("button", name="Remove", exact=True).first
                 await confirm_btn.wait_for(state="visible", timeout=5000)
                 await confirm_btn.click()
 
-                removed.append(name)
-                print(f"Removed {name}")
+                removed_count += 1
+                with REMOVED_LOG_PATH.open("a", encoding="utf-8") as f:
+                    f.write(name + "\n")
+                print(f"Removed {name} ({removed_count} so far)")
+                stagnant_rounds = 0
+                await asyncio.sleep(REMOVE_DELAY_SECONDS)
             except PlaywrightTimeoutError:
-                print(f"Failed to remove {name} (UI element not found), skipping.")
-            await asyncio.sleep(REMOVE_DELAY_SECONDS)
+                print(f"Failed to remove {name}, skipping.")
+                failed_names.add(name)
+        else:
+            print(f"Stopped after {max_rounds} rounds.")
 
-        with REMOVED_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write("\n".join(removed) + "\n")
-        print(f"Done. Removed {len(removed)} member(s). Logged to {REMOVED_LOG_PATH.name}.")
+        print(f"Done. Removed {removed_count} member(s). Logged to {REMOVED_LOG_PATH.name}.")
