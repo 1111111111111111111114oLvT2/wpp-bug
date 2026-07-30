@@ -1,4 +1,5 @@
 import asyncio
+import re
 from pathlib import Path
 
 import yaml
@@ -35,8 +36,8 @@ class AsyncCamoufoxClient:
                 await page.goto("https://web.whatsapp.com/")
 
                 await self._wait_for_login(page)
-                members_dialog = await self._open_members_dialog(page, search_term)
-                await self._remove_non_admins(page, members_dialog)
+                members_dialog, total_members = await self._open_members_dialog(page, search_term)
+                await self._remove_non_admins(page, members_dialog, total_members)
 
                 print("Browser stays open. Close it or press Ctrl+C to stop.")
                 await context.wait_for_event("close", timeout=0)
@@ -80,7 +81,9 @@ class AsyncCamoufoxClient:
                 break
         print("Logged in.")
 
-    async def _open_members_dialog(self, page: Page, search_term: str) -> Locator:
+    async def _open_members_dialog(
+        self, page: Page, search_term: str
+    ) -> tuple[Locator, int | None]:
         search_box = page.get_by_role("textbox", name="Search or start a new chat")
         try:
             await search_box.wait_for(state="visible", timeout=PAGE_LOAD_TIMEOUT_MS)
@@ -121,20 +124,29 @@ class AsyncCamoufoxClient:
         # and scope queries into than the mixed community-info sidebar.
         members_header = page.get_by_text("community members", exact=False).first
         await members_header.wait_for(state="visible", timeout=10000)
+        header_text = await members_header.text_content() or ""
+        match = re.match(r"\s*(\d+)", header_text)
+        total_members = int(match.group(1)) if match else None
         await members_header.click()
 
         members_dialog = page.get_by_role("dialog", name="Members", exact=False)
         await members_dialog.wait_for(state="visible", timeout=10000)
-        return members_dialog
+        return members_dialog, total_members
 
-    async def _list_non_admin_members(self, page: Page, scope: Locator) -> list[str]:
+    async def _list_non_admin_members(
+        self, page: Page, scope: Locator, total_members: int | None
+    ) -> list[str]:
         """Scrolls the (virtualized) member list and collects every name
         that has no owner/admin marker."""
         names: dict[str, bool] = {}
         stagnant_rounds = 0
         last_count = -1
+        # Belt-and-suspenders cap so a stuck scroll can't loop forever even
+        # if the header count is wrong or missing - generous for a list
+        # this size (each round loads only a handful of new rows).
+        max_rounds = max(500, (total_members or 0) * 3)
         await scope.hover()
-        while stagnant_rounds < 3:
+        for round_num in range(max_rounds):
             for row in await scope.locator('[data-testid="cell-frame-container"]').all():
                 title_el = row.locator('[data-testid="cell-frame-title"] span[title]').first
                 try:
@@ -146,18 +158,32 @@ class AsyncCamoufoxClient:
                 is_admin = await row.locator(ADMIN_MARKER_SELECTOR).count() > 0
                 names[name] = names.get(name, False) or is_admin
 
+            if total_members is not None and len(names) >= total_members:
+                break
+
             if len(names) == last_count:
                 stagnant_rounds += 1
+                if total_members is None and stagnant_rounds >= 3:
+                    break
             else:
                 stagnant_rounds = 0
             last_count = len(names)
+
+            if round_num % 10 == 0:
+                progress = f"/{total_members}" if total_members is not None else ""
+                print(f"Scanning members... {len(names)}{progress}")
+
             await page.mouse.wheel(0, 400)
             await page.wait_for_timeout(500)
+        else:
+            print(f"Stopped after {max_rounds} scroll rounds ({len(names)} members found).")
 
         return [name for name, is_admin in names.items() if not is_admin]
 
-    async def _remove_non_admins(self, page: Page, scope: Locator) -> None:
-        targets = await self._list_non_admin_members(page, scope)
+    async def _remove_non_admins(
+        self, page: Page, scope: Locator, total_members: int | None
+    ) -> None:
+        targets = await self._list_non_admin_members(page, scope, total_members)
         if not targets:
             print("No non-admin members found.")
             return
