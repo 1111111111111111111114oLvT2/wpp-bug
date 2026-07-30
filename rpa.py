@@ -22,7 +22,7 @@ REMOVE_DELAY_SECONDS = 3
 
 class AsyncCamoufoxClient:
     async def run(self) -> None:
-        config = yaml.safe_load(CONFIG_PATH.read_text())
+        config = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
         search_term = config["search"]
 
         async with AsyncCamoufox(
@@ -169,6 +169,6 @@ class AsyncCamoufoxClient:
                 print(f"Failed to remove {name} (UI element not found), skipping.")
             await asyncio.sleep(REMOVE_DELAY_SECONDS)
 
-        with REMOVED_LOG_PATH.open("a") as f:
+        with REMOVED_LOG_PATH.open("a", encoding="utf-8") as f:
             f.write("\n".join(removed) + "\n")
         print(f"Done. Removed {len(removed)} member(s). Logged to {REMOVED_LOG_PATH.name}.")
