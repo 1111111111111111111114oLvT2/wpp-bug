@@ -14,3 +14,6 @@ wheels/
 
 # Log of removed community members (contains real people's names)
 removed_members.log
+
+# Debug screenshot saved when the page fails to load in time
+failure_screenshot.png

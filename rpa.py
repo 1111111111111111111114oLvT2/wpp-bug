@@ -8,6 +8,10 @@ from playwright.async_api import Locator, Page, TimeoutError as PlaywrightTimeou
 USER_DATA_DIR = Path(__file__).parent / ".camoufox-profile"
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 REMOVED_LOG_PATH = Path(__file__).parent / "removed_members.log"
+FAILURE_SCREENSHOT_PATH = Path(__file__).parent / "failure_screenshot.png"
+# A cold profile's first load (no cached WhatsApp assets yet) can take much
+# longer than a warm one, so this is generous on purpose.
+PAGE_LOAD_TIMEOUT_MS = 60000
 
 ADMIN_MARKER_SELECTOR = (
     '[data-testid="community-creator-marker"], [data-testid="community-admin-marker"]'
@@ -27,14 +31,14 @@ class AsyncCamoufoxClient:
             user_data_dir=str(USER_DATA_DIR),
         ) as context:
             page = context.pages[0] if context.pages else await context.new_page()
-            await page.goto("https://web.whatsapp.com/")
-
-            await self._wait_for_login(page)
-            members_dialog = await self._open_members_dialog(page, search_term)
-            await self._remove_non_admins(page, members_dialog)
-
-            print("Browser stays open. Close it or press Ctrl+C to stop.")
             try:
+                await page.goto("https://web.whatsapp.com/")
+
+                await self._wait_for_login(page)
+                members_dialog = await self._open_members_dialog(page, search_term)
+                await self._remove_non_admins(page, members_dialog)
+
+                print("Browser stays open. Close it or press Ctrl+C to stop.")
                 await context.wait_for_event("close", timeout=0)
             except (KeyboardInterrupt, asyncio.CancelledError):
                 pass
@@ -44,7 +48,7 @@ class AsyncCamoufoxClient:
         try:
             # If the profile is already logged in, WhatsApp never renders
             # the QR canvas, so this just times out instead of matching.
-            await qr_code.wait_for(state="visible", timeout=15000)
+            await qr_code.wait_for(state="visible", timeout=PAGE_LOAD_TIMEOUT_MS)
         except PlaywrightTimeoutError:
             print("Already logged in.")
             return
@@ -63,7 +67,16 @@ class AsyncCamoufoxClient:
 
     async def _open_members_dialog(self, page: Page, search_term: str) -> Locator:
         search_box = page.get_by_role("textbox", name="Search or start a new chat")
-        await search_box.wait_for(state="visible", timeout=15000)
+        try:
+            await search_box.wait_for(state="visible", timeout=PAGE_LOAD_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            await page.screenshot(path=str(FAILURE_SCREENSHOT_PATH))
+            print(
+                f"The chat list never showed up (page title: {await page.title()!r}). "
+                f"Saved {FAILURE_SCREENSHOT_PATH.name} - check what the browser actually "
+                "displayed."
+            )
+            raise
         await search_box.fill(search_term)
         await page.wait_for_timeout(2000)
 
