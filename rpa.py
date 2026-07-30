@@ -123,19 +123,26 @@ class AsyncCamoufoxClient:
             await community_tab.click()
             await page.wait_for_timeout(500)
 
-        # Clicking the "N community members" header opens a dedicated,
-        # unvirtualized-by-clutter "Members (N)" dialog - easier to scroll
-        # and scope queries into than the mixed community-info sidebar.
         members_header = page.get_by_text("community members", exact=False).first
         await members_header.wait_for(state="visible", timeout=NAV_TIMEOUT_MS)
         header_text = await members_header.text_content() or ""
         match = re.match(r"\s*(\d+)", header_text)
         total_members = int(match.group(1)) if match else None
+
+        members_dialog = await self._open_members_list(page)
+        return members_dialog, total_members
+
+    async def _open_members_list(self, page: Page) -> Locator:
+        # Clicking the "N community members" header opens a dedicated,
+        # unvirtualized-by-clutter "Members (N)" dialog - easier to scroll
+        # and scope queries into than the mixed community-info sidebar.
+        members_header = page.get_by_text("community members", exact=False).first
+        await members_header.wait_for(state="visible", timeout=NAV_TIMEOUT_MS)
         await members_header.click()
 
         members_dialog = page.get_by_role("dialog", name="Members", exact=False)
         await members_dialog.wait_for(state="visible", timeout=NAV_TIMEOUT_MS)
-        return members_dialog, total_members
+        return members_dialog
 
     async def _find_next_removable_row(
         self, scope: Locator, skip_names: set[str]
@@ -212,6 +219,13 @@ class AsyncCamoufoxClient:
                 print(f"Removed {name} ({removed_count} so far)")
                 stagnant_rounds = 0
                 await asyncio.sleep(REMOVE_DELAY_SECONDS)
+
+                # Removing a member closes the Members dialog back to the
+                # plain Community info panel (confirmed live: the dialog's
+                # role="dialog" node is simply gone right after) - reopen
+                # it before looking for the next target.
+                scope = await self._open_members_list(page)
+                await scope.hover()
             except PlaywrightTimeoutError:
                 print(f"Failed to remove {name}, skipping.")
                 failed_names.add(name)
